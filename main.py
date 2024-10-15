@@ -13,12 +13,42 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # Set the style for seaborn
 sns.set(style='whitegrid')
 
-# Step 1: Fetch historical data
-tickers = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMD', 'META']
+# **Step 1: User Input for Tickers and Dates**
 
-# Adjust the end date to today's date
-end_date = datetime.today().strftime('%Y-%m-%d')
-start_date = '2015-01-01'
+# Get user input for tickers
+tickers_input = input("Enter tickers separated by commas (e.g., AAPL, MSFT, GOOGL): ")
+tickers = [ticker.strip().upper() for ticker in tickers_input.split(',')]
+
+# Validate tickers by checking if data can be fetched
+valid_tickers = []
+for ticker in tickers:
+    try:
+        test_data = yf.Ticker(ticker).history(period='1d')
+        if not test_data.empty:
+            valid_tickers.append(ticker)
+        else:
+            print(f"Warning: No data found for ticker '{ticker}'. It will be skipped.")
+    except Exception as e:
+        print(f"Error fetching data for ticker '{ticker}': {e}")
+
+tickers = valid_tickers
+if not tickers:
+    raise ValueError("No valid tickers provided. Please restart and enter valid ticker symbols.")
+
+# Get user input for start and end dates
+def validate_date(date_text):
+    try:
+        datetime.strptime(date_text, '%Y-%m-%d')
+        return date_text
+    except ValueError:
+        raise ValueError("Incorrect date format. Please enter the date in YYYY-MM-DD format.")
+
+start_date = validate_date(input("Enter the start date in YYYY-MM-DD format (e.g., 2015-01-01): "))
+end_date_input = input("Enter the end date in YYYY-MM-DD format or press Enter for today's date: ")
+if end_date_input.strip() == '':
+    end_date = datetime.today().strftime('%Y-%m-%d')
+else:
+    end_date = validate_date(end_date_input)
 
 # Fetch data with error handling
 try:
@@ -26,6 +56,7 @@ try:
     data = data.ffill()
 except Exception as e:
     print(f"Error fetching data: {e}")
+    exit()
 
 returns = data.pct_change().dropna()
 
@@ -121,6 +152,9 @@ for ticker in tickers:
 
 # Handle any missing market cap data
 total_market_cap = sum(market_caps.values())
+if total_market_cap == 0:
+    raise ValueError("Market capitalization data not available for the provided tickers.")
+
 market_cap_weights = np.array([market_caps[ticker] for ticker in tickers]) / total_market_cap
 
 # Ensure weights sum to 1
