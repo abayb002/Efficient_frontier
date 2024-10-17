@@ -7,8 +7,15 @@ from datetime import datetime
 import seaborn as sns
 import warnings
 
+# **New Imports for Machine Learning**
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+
 # Suppress warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=FutureWarning,
+                        message="The 'unit' keyword in TimedeltaIndex construction is deprecated")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message="Pyarrow will become a required dependency")
 
 # Set the style for seaborn
 sns.set(style='whitegrid')
@@ -65,24 +72,93 @@ if returns.isnull().values.any():
     print("Data contains NaNs. Dropping NaNs.")
     returns = returns.dropna()
 
-# Step 2: Calculate mean returns and covariance matrix
-mean_returns = returns.mean()
+# Step 2: Calculate covariance matrix
 cov_matrix = returns.cov()
 num_assets = len(tickers)
 risk_free_rate = 0.05  # 5% annual risk-free rate
 
-# Function to calculate portfolio performance
-def portfolio_performance(weights, mean_returns, cov_matrix):
-    returns = np.dot(weights, mean_returns) * 252
-    volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix * 252, weights)))
-    return returns, volatility
+# **Machine Learning for Return Forecasting**
 
-# Constraints and bounds
+# Function to create lagged features
+def create_features(asset_returns, lags=5):
+    features = pd.DataFrame(index=asset_returns.index)
+    for i in range(1, lags + 1):
+        features[f'lag_{i}'] = asset_returns.shift(i)
+    return features
+
+# Prepare predicted returns
+predicted_returns = pd.Series(index=tickers, dtype=float)
+
+for ticker in tickers:
+    # Prepare features and labels
+    asset_returns = returns[ticker]
+    features = create_features(asset_returns)
+    labels = asset_returns.shift(-1)  # Predict next day's return
+
+    # Combine features and labels and drop NaNs
+    df_ml = pd.concat([features, labels], axis=1)
+    df_ml.dropna(inplace=True)
+
+    # Check if there is enough data after dropping NaNs
+    if df_ml.empty or len(df_ml) < 10:
+        print(f"Not enough data to train the model for {ticker}. Skipping.")
+        predicted_returns[ticker] = np.nan
+        continue
+
+    # Separate features and labels
+    labels = df_ml.iloc[:, -1]
+    features = df_ml.iloc[:, :-1]
+
+    # Keep track of the feature columns used during training
+    feature_columns = features.columns
+
+    # Split the data
+    X_train, X_test, y_train, y_test = train_test_split(
+        features, labels, test_size=0.2, shuffle=False
+    )
+
+    # Train the model
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+
+    # Prepare the last features for prediction using the same feature columns
+    last_features = create_features(asset_returns).iloc[[-1]]
+    last_features = last_features[feature_columns]
+
+    # Check if last_features contain NaNs
+    if last_features.isnull().any().any():
+        print(f"Cannot predict return for {ticker} due to insufficient data in last features.")
+        predicted_returns[ticker] = np.nan
+        continue
+
+    # Predict the next period return
+    predicted_return = model.predict(last_features)[0]
+    predicted_returns[ticker] = predicted_return
+
+print("\nPredicted Returns:")
+print(predicted_returns.dropna())
+
+# Filter tickers with valid predicted returns
+valid_tickers = predicted_returns.dropna().index.tolist()
+if not valid_tickers:
+    raise ValueError("No valid predicted returns available for optimization.")
+
+# Update variables with valid tickers
+predicted_mean_returns = predicted_returns.dropna() * 252  # Annualize predicted returns
+cov_matrix = returns[valid_tickers].cov()
+num_assets = len(valid_tickers)
+tickers = valid_tickers
+
+# Update constraints, bounds, and initial guess
 constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
 bounds = tuple((0.01, 1) for _ in range(num_assets))  # Minimum weight of 1%
-
-# Initial guess
 init_guess = num_assets * [1. / num_assets]
+
+# Function to calculate portfolio performance
+def portfolio_performance(weights, mean_returns, cov_matrix):
+    returns = np.dot(weights, mean_returns)
+    volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix * 252, weights)))
+    return returns, volatility
 
 # Optimization options with adjusted 'eps'
 options = {'eps': 1e-10}
@@ -90,7 +166,7 @@ options = {'eps': 1e-10}
 # **A. Minimum Variance Portfolio**
 
 def min_variance(weights):
-    return portfolio_performance(weights, mean_returns, cov_matrix)[1]  # Return volatility
+    return portfolio_performance(weights, predicted_mean_returns, cov_matrix)[1]  # Return volatility
 
 opt_min_variance = minimize(
     min_variance,
@@ -102,13 +178,18 @@ opt_min_variance = minimize(
 )
 
 min_var_weights = opt_min_variance.x
-min_var_return, min_var_volatility = portfolio_performance(min_var_weights, mean_returns, cov_matrix)
-min_var_sharpe = (min_var_return - risk_free_rate) / min_var_volatility
+min_var_return, min_var_volatility = portfolio_performance(
+    min_var_weights, predicted_mean_returns, cov_matrix
+)
+min_var_sharpe = (
+    (min_var_return - risk_free_rate) / min_var_volatility
+    if min_var_volatility != 0 else np.nan
+)
 
 # **B. Maximum Return Portfolio**
 
 def neg_return(weights):
-    return -portfolio_performance(weights, mean_returns, cov_matrix)[0]  # Negative return for minimization
+    return -portfolio_performance(weights, predicted_mean_returns, cov_matrix)[0]
 
 opt_max_return = minimize(
     neg_return,
@@ -120,14 +201,19 @@ opt_max_return = minimize(
 )
 
 max_return_weights = opt_max_return.x
-max_return_return, max_return_volatility = portfolio_performance(max_return_weights, mean_returns, cov_matrix)
-max_return_sharpe = (max_return_return - risk_free_rate) / max_return_volatility
+max_return_return, max_return_volatility = portfolio_performance(
+    max_return_weights, predicted_mean_returns, cov_matrix
+)
+max_return_sharpe = (
+    (max_return_return - risk_free_rate) / max_return_volatility
+    if max_return_volatility != 0 else np.nan
+)
 
 # **C. Maximum Sharpe Ratio Portfolio**
 
 def neg_sharpe_ratio(weights):
-    p_ret, p_vol = portfolio_performance(weights, mean_returns, cov_matrix)
-    return -(p_ret - risk_free_rate) / p_vol  # Negative Sharpe ratio for minimization
+    p_ret, p_vol = portfolio_performance(weights, predicted_mean_returns, cov_matrix)
+    return -(p_ret - risk_free_rate) / p_vol if p_vol != 0 else 0
 
 opt_max_sharpe = minimize(
     neg_sharpe_ratio,
@@ -139,8 +225,13 @@ opt_max_sharpe = minimize(
 )
 
 max_sharpe_weights = opt_max_sharpe.x
-max_sharpe_return, max_sharpe_volatility = portfolio_performance(max_sharpe_weights, mean_returns, cov_matrix)
-max_sharpe_ratio = (max_sharpe_return - risk_free_rate) / max_sharpe_volatility
+max_sharpe_return, max_sharpe_volatility = portfolio_performance(
+    max_sharpe_weights, predicted_mean_returns, cov_matrix
+)
+max_sharpe_ratio = (
+    (max_sharpe_return - risk_free_rate) / max_sharpe_volatility
+    if max_sharpe_volatility != 0 else np.nan
+)
 
 # **D. Market Cap Weighted Portfolio**
 
@@ -161,19 +252,24 @@ market_cap_weights = np.array([market_caps[ticker] for ticker in tickers]) / tot
 market_cap_weights /= np.sum(market_cap_weights)
 
 # Calculate performance
-mc_return, mc_volatility = portfolio_performance(market_cap_weights, mean_returns, cov_matrix)
-mc_sharpe = (mc_return - risk_free_rate) / mc_volatility
+mc_return, mc_volatility = portfolio_performance(
+    market_cap_weights, predicted_mean_returns, cov_matrix
+)
+mc_sharpe = (
+    (mc_return - risk_free_rate) / mc_volatility
+    if mc_volatility != 0 else np.nan
+)
 
 # **Display Portfolio Weights and Performance**
 
 def display_portfolio(weights, portfolio_name):
     print(f"\n{portfolio_name} Portfolio Weights:")
     for ticker, weight in zip(tickers, weights):
-        print(f"{ticker}: {weight*100:.2f}%")
-    p_return, p_volatility = portfolio_performance(weights, mean_returns, cov_matrix)
-    p_sharpe = (p_return - risk_free_rate) / p_volatility
-    print(f"Expected Annual Return: {p_return*100:.2f}%")
-    print(f"Annual Volatility (Risk): {p_volatility*100:.2f}%")
+        print(f"{ticker}: {weight * 100:.2f}%")
+    p_return, p_volatility = portfolio_performance(weights, predicted_mean_returns, cov_matrix)
+    p_sharpe = (p_return - risk_free_rate) / p_volatility if p_volatility != 0 else np.nan
+    print(f"Expected Annual Return (Predicted): {p_return * 100:.2f}%")
+    print(f"Annual Volatility (Risk): {p_volatility * 100:.2f}%")
     print(f"Sharpe Ratio: {p_sharpe:.2f}")
 
 display_portfolio(min_var_weights, "Minimum Variance")
@@ -191,46 +287,64 @@ def random_portfolios(num_portfolios, mean_returns, cov_matrix, risk_free_rate):
         weights /= np.sum(weights)
         weights_record.append(weights)
         p_return, p_volatility = portfolio_performance(weights, mean_returns, cov_matrix)
-        p_sharpe = (p_return - risk_free_rate) / p_volatility
+        p_sharpe = (p_return - risk_free_rate) / p_volatility if p_volatility != 0 else np.nan
         results[0, i] = p_volatility * 100  # Convert to percentage
         results[1, i] = p_return * 100      # Convert to percentage
         results[2, i] = p_sharpe
     return results, weights_record
 
-results, _ = random_portfolios(50000, mean_returns, cov_matrix, risk_free_rate)
+results, _ = random_portfolios(50000, predicted_mean_returns, cov_matrix, risk_free_rate)
+
+# Filter out any portfolios with NaN values
+valid_results = results[:, ~np.isnan(results).any(axis=0)]
 
 # Plotting the Efficient Frontier and Portfolios
 plt.figure(figsize=(12, 8))
-plt.scatter(results[0], results[1], c=results[2], cmap='viridis', s=2, alpha=0.5)
+plt.scatter(valid_results[0], valid_results[1], c=valid_results[2], cmap='viridis', s=2, alpha=0.5)
 plt.colorbar(label='Sharpe Ratio')
 plt.xlabel('Volatility (%)')
 plt.ylabel('Expected Return (%)')
-plt.title('Efficient Frontier')
+plt.title('Efficient Frontier with Predicted Returns')
 
 # Plotting the portfolios as circles with adjusted sizes
-plt.scatter(min_var_volatility * 100, min_var_return * 100, color='red', marker='o', s=100, label='Minimum Variance')
-plt.scatter(max_return_volatility * 100, max_return_return * 100, color='blue', marker='o', s=100, label='Maximum Return')
-plt.scatter(max_sharpe_volatility * 100, max_sharpe_return * 100, color='green', marker='o', s=100, label='Maximum Sharpe Ratio')
-plt.scatter(mc_volatility * 100, mc_return * 100, color='purple', marker='o', s=100, label='Market Cap Weighted')
+plt.scatter(
+    min_var_volatility * 100, min_var_return * 100,
+    color='red', marker='o', s=100, label='Minimum Variance'
+)
+plt.scatter(
+    max_return_volatility * 100, max_return_return * 100,
+    color='blue', marker='o', s=100, label='Maximum Return'
+)
+plt.scatter(
+    max_sharpe_volatility * 100, max_sharpe_return * 100,
+    color='green', marker='o', s=100, label='Maximum Sharpe Ratio'
+)
+plt.scatter(
+    mc_volatility * 100, mc_return * 100,
+    color='purple', marker='o', s=100, label='Market Cap Weighted'
+)
 
 plt.legend(labelspacing=0.8)
-plt.savefig('efficient_frontier.png')
+plt.savefig('efficient_frontier_predicted.png')
 plt.close()
 
 # **Monte Carlo Simulation and VaR/CVaR Calculations**
 
 def monte_carlo_simulation(mean_returns, cov_matrix, weights, num_simulations=10000, num_days=252):
+    daily_mean_returns = mean_returns / 252
+    daily_cov_matrix = cov_matrix / 252
     port_returns = []
     for _ in range(num_simulations):
         # Simulate daily returns over the year
-        daily_returns = np.random.multivariate_normal(mean_returns, cov_matrix, num_days)
+        daily_returns = np.random.multivariate_normal(
+            daily_mean_returns, daily_cov_matrix, num_days
+        )
         # Calculate portfolio daily returns
         port_daily_returns = np.sum(daily_returns * weights, axis=1)
         # Compound daily returns to get annual return
         port_cumulative_return = np.prod(1 + port_daily_returns) - 1
         port_returns.append(port_cumulative_return)
-    port_returns = np.array(port_returns)
-    return port_returns
+    return np.array(port_returns)
 
 def calculate_var_cvar(portfolio_returns, confidence_level=0.95):
     sorted_returns = np.sort(portfolio_returns)
@@ -250,13 +364,18 @@ portfolios = {
 
 for name, weights in portfolios.items():
     # Monte Carlo Simulation
-    portfolio_returns = monte_carlo_simulation(mean_returns, cov_matrix, weights)
-    # The portfolio_returns are already annualized through compounding
+    portfolio_returns = monte_carlo_simulation(predicted_mean_returns, cov_matrix, weights)
+    # Output summary statistics
+    print(f"\n{name} Portfolio Simulated Returns:")
+    print(f"Mean Return: {np.mean(portfolio_returns) * 100:.2f}%")
+    print(f"Median Return: {np.median(portfolio_returns) * 100:.2f}%")
+    print(f"Minimum Return: {np.min(portfolio_returns) * 100:.2f}%")
+    print(f"Maximum Return: {np.max(portfolio_returns) * 100:.2f}%")
     # Calculate VaR and CVaR
     var, cvar = calculate_var_cvar(portfolio_returns, confidence_level=0.95)
     print(f"\n{name} Portfolio:")
-    print(f"Value at Risk (95% confidence): {var*100:.2f}%")
-    print(f"Conditional Value at Risk (95% confidence): {cvar*100:.2f}%")
+    print(f"Value at Risk (95% confidence): {var * 100:.2f}%")
+    print(f"Conditional Value at Risk (95% confidence): {cvar * 100:.2f}%")
     # Plot the distribution
     plt.figure(figsize=(10, 6))
     sns.histplot(portfolio_returns * 100, bins=50, kde=True, color='skyblue')
@@ -264,6 +383,6 @@ for name, weights in portfolios.items():
     plt.xlabel('Simulated Annual Return (%)')
     plt.ylabel('Frequency')
     # Save the plot
-    filename = f'{name.lower().replace(" ", "_")}_returns_distribution.png'
+    filename = f'{name.lower().replace(" ", "_")}_returns_distribution_predicted.png'
     plt.savefig(filename)
     plt.close()
