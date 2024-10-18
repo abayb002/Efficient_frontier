@@ -52,9 +52,9 @@ if end_date_input.strip() == '':
 else:
     end_date = validate_date(end_date_input)
 
-# Fetch data with error handling
+# Fetch data with error handling and suppress the progress bar
 try:
-    data = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
+    data = yf.download(tickers, start=start_date, end=end_date, progress=False)['Adj Close']
     data = data.ffill()
 except Exception as e:
     print(f"Error fetching data: {e}")
@@ -67,11 +67,22 @@ if returns.isnull().values.any():
     print("Data contains NaNs. Dropping NaNs.")
     returns = returns.dropna()
 
-# Step 2: Calculate mean returns and covariance matrix
-mean_returns = returns.mean()
-cov_matrix = returns.cov()
+# **Step 2: Calculate Mean Returns and Covariance Matrix**
+
+# Ensure data alignment and convert to NumPy arrays
+mean_returns = returns.mean().values  # Convert to NumPy array
+cov_matrix = returns.cov().values     # Convert to NumPy array
+returns_array = returns.values        # For use in simulations
+
 num_assets = len(tickers)
-risk_free_rate = 0.05  # 5% annual risk-free rate
+
+# Allow user to input risk-free rate
+risk_free_rate_input = input("Enter the annual risk-free rate as a percentage (e.g., 5 for 5%): ")
+try:
+    risk_free_rate = float(risk_free_rate_input) / 100
+except ValueError:
+    print("Invalid input for risk-free rate. Please enter a numerical value.")
+    exit()
 
 # Function to calculate portfolio performance
 def portfolio_performance(weights, mean_returns, cov_matrix):
@@ -81,7 +92,7 @@ def portfolio_performance(weights, mean_returns, cov_matrix):
 
 # Constraints and bounds
 constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
-bounds = tuple((0.01, 1) for _ in range(num_assets))  # Minimum weight of 1%
+bounds = tuple((0, 1) for _ in range(num_assets))  # Bounds between 0% and 100%
 
 # Initial guess
 init_guess = num_assets * [1. / num_assets]
@@ -103,6 +114,10 @@ opt_min_variance = minimize(
     options=options
 )
 
+if not opt_min_variance.success:
+    print("Optimization for Minimum Variance Portfolio did not converge.")
+    # Handle accordingly, e.g., exit or proceed with warnings
+
 min_var_weights = opt_min_variance.x
 min_var_return, min_var_volatility = portfolio_performance(min_var_weights, mean_returns, cov_matrix)
 min_var_sharpe = (min_var_return - risk_free_rate) / min_var_volatility
@@ -120,6 +135,9 @@ opt_max_return = minimize(
     constraints=constraints,
     options=options
 )
+
+if not opt_max_return.success:
+    print("Optimization for Maximum Return Portfolio did not converge.")
 
 max_return_weights = opt_max_return.x
 max_return_return, max_return_volatility = portfolio_performance(max_return_weights, mean_returns, cov_matrix)
@@ -139,6 +157,9 @@ opt_max_sharpe = minimize(
     constraints=constraints,
     options=options
 )
+
+if not opt_max_sharpe.success:
+    print("Optimization for Maximum Sharpe Ratio Portfolio did not converge.")
 
 max_sharpe_weights = opt_max_sharpe.x
 max_sharpe_return, max_sharpe_volatility = portfolio_performance(max_sharpe_weights, mean_returns, cov_matrix)
@@ -189,7 +210,7 @@ def random_portfolios(num_portfolios, mean_returns, cov_matrix, risk_free_rate):
     results = np.zeros((3, num_portfolios))
     weights_record = []
     for i in range(num_portfolios):
-        weights = np.random.uniform(0.01, 1, num_assets)
+        weights = np.random.uniform(0, 1, num_assets)
         weights /= np.sum(weights)
         weights_record.append(weights)
         p_return, p_volatility = portfolio_performance(weights, mean_returns, cov_matrix)
@@ -223,11 +244,15 @@ plt.close()
 
 def monte_carlo_simulation(mean_returns, cov_matrix, weights, num_simulations=10000, num_days=252):
     port_returns = []
+    # Use bootstrapping from historical returns
+    historical_returns = returns_array  # Use the aligned returns array
+    num_obs = historical_returns.shape[0]
     for _ in range(num_simulations):
-        # Simulate daily returns over the year
-        daily_returns = np.random.multivariate_normal(mean_returns, cov_matrix, num_days)
+        # Randomly sample days with replacement
+        sampled_indices = np.random.randint(0, num_obs, num_days)
+        sampled_returns = historical_returns[sampled_indices]
         # Calculate portfolio daily returns
-        port_daily_returns = np.sum(daily_returns * weights, axis=1)
+        port_daily_returns = np.sum(sampled_returns * weights, axis=1)
         # Compound daily returns to get annual return
         port_cumulative_return = np.prod(1 + port_daily_returns) - 1
         port_returns.append(port_cumulative_return)
@@ -251,7 +276,7 @@ portfolios = {
 }
 
 for name, weights in portfolios.items():
-    # Monte Carlo Simulation
+    # Monte Carlo Simulation using bootstrapping
     portfolio_returns = monte_carlo_simulation(mean_returns, cov_matrix, weights)
     # The portfolio_returns are already annualized through compounding
     # Calculate VaR and CVaR
