@@ -15,8 +15,6 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message="Pyarrow 
 # Set the style for seaborn
 sns.set(style='whitegrid')
 
-# **Step 1: User Input for Tickers and Dates**
-
 # Get user input for tickers
 tickers_input = input("Enter tickers separated by commas (e.g., AAPL, MSFT, GOOGL): ")
 tickers = [ticker.strip().upper() for ticker in tickers_input.split(',')]
@@ -67,7 +65,7 @@ if returns.isnull().values.any():
     print("Data contains NaNs. Dropping NaNs.")
     returns = returns.dropna()
 
-# **Step 2: Calculate Mean Returns and Covariance Matrix**
+# Calculate Mean Returns and Covariance Matrix**
 
 # Ensure data alignment and convert to NumPy arrays
 mean_returns = returns.mean().values  # Convert to NumPy array
