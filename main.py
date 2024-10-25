@@ -34,7 +34,7 @@ Enter the stock tickers, select the date range, and adjust parameters to analyze
 
 # Get user input for tickers
 tickers_input = st.text_input("Enter tickers separated by commas (e.g., AAPL, MSFT, GOOGL):",
-                              "AAPL, MSFT, GOOGL, AMZN, META, TSLA, NFLX, NVDA, JPM, BAC, CRM, AMD")
+                              "TSM, AVGO, JPM, NVO, UNH, HD, BAC, KO, PEP, BX, V, AXP, CAT, TXN, GOOGL, NVDA, META, AMZN")
 tickers = [ticker.strip().upper() for ticker in tickers_input.split(',')]
 
 # Get user input for start and end dates
@@ -90,13 +90,14 @@ def fetch_data(tickers, benchmark_ticker, start_date, end_date):
     if data.empty:
         st.error("Asset data is empty after fetching. Please check the tickers and date range.")
         st.stop()
-    else:
-        st.write(f"Fetched data for assets: {data.shape}")
-        st.write(f"Asset data date range: {data.index.min()} to {data.index.max()}")
 
     # Fetch benchmark data
     try:
+        # Ensure benchmark_ticker is a string, not a list
         benchmark_data = yf.download(benchmark_ticker, start=start_date, end=end_date, progress=False)['Adj Close']
+        # Convert to Series if DataFrame with single column
+        if isinstance(benchmark_data, pd.DataFrame):
+            benchmark_data = benchmark_data.squeeze()
     except Exception as e:
         st.error(f"Error fetching benchmark data: {e}")
         st.stop()
@@ -104,21 +105,20 @@ def fetch_data(tickers, benchmark_ticker, start_date, end_date):
     if benchmark_data.empty:
         st.error("Benchmark data is empty after fetching. Please check the benchmark ticker and date range.")
         st.stop()
-    else:
-        st.write(f"Fetched benchmark data: {benchmark_data.shape}")
-        st.write(f"Benchmark data date range: {benchmark_data.index.min()} to {benchmark_data.index.max()}")
 
     # Forward fill and drop NaNs
     data = data.ffill().dropna()
     benchmark_data = benchmark_data.ffill().dropna()
+
+    # Make indices timezone-naive
+    data.index = data.index.tz_localize(None)
+    benchmark_data.index = benchmark_data.index.tz_localize(None)
 
     # Align dates using intersection
     common_dates = data.index.intersection(benchmark_data.index)
     if common_dates.empty:
         st.error("No overlapping dates between asset data and benchmark data.")
         st.stop()
-    else:
-        st.write(f"Number of overlapping dates: {len(common_dates)}")
 
     data = data.loc[common_dates]
     benchmark_data = benchmark_data.loc[common_dates]
@@ -127,19 +127,18 @@ def fetch_data(tickers, benchmark_ticker, start_date, end_date):
     returns = data.pct_change().dropna()
     benchmark_returns = benchmark_data.pct_change().dropna()
 
+    # Ensure indices are datetime and timezone-naive
+    returns.index = pd.to_datetime(returns.index).tz_localize(None)
+    benchmark_returns.index = pd.to_datetime(benchmark_returns.index).tz_localize(None)
+
     # Re-align after pct_change
     common_dates = returns.index.intersection(benchmark_returns.index)
     if common_dates.empty:
-        st.error("No overlapping dates between asset returns and benchmark returns.")
+        st.error("No overlapping dates between asset returns and benchmark returns after returns calculation.")
         st.stop()
-    else:
-        st.write(f"Number of overlapping dates after returns calculation: {len(common_dates)}")
 
     returns = returns.loc[common_dates]
     benchmark_returns = benchmark_returns.loc[common_dates]
-
-    st.write(f"Final returns shape: {returns.shape}")
-    st.write(f"Final benchmark returns shape: {benchmark_returns.shape}")
 
     return returns, benchmark_returns, tickers, benchmark_data
 
@@ -168,7 +167,7 @@ def portfolio_performance(weights, mean_returns, cov_matrix):
 
 # Function to compute portfolio variance
 def portfolio_variance(weights, cov_matrix):
-    return np.dot(weights.T, np.dot(cov_matrix * 252, weights))
+    return np.dot(weights.T, np.dot(cov_matrix, weights))
 
 # Function to compute portfolio daily returns
 def compute_portfolio_returns(weights, returns_df):
@@ -188,8 +187,8 @@ bounds = tuple((0, max_weight) for _ in range(num_assets))  # Bounds between 0% 
 # Initial guess
 init_guess = num_assets * [1. / num_assets]
 
-# Optimization options with adjusted 'eps'
-options = {'eps': 1e-10}
+# Optimization options
+options = {'maxiter': 1000, 'disp': False}
 
 # **Optimization Functions**
 
@@ -213,29 +212,7 @@ def optimize_portfolios():
     min_var_return, min_var_volatility = portfolio_performance(min_var_weights, mean_returns, cov_matrix)
     min_var_sharpe = (min_var_return - risk_free_rate) / min_var_volatility
 
-    # **B. Maximum Return Portfolio**
-
-    def neg_portfolio_return(weights, mean_returns):
-        return -np.dot(weights, mean_returns) * 252
-
-    opt_max_return = minimize(
-        neg_portfolio_return,
-        init_guess,
-        args=(mean_returns,),
-        method='SLSQP',
-        bounds=bounds,
-        constraints=constraints,
-        options=options
-    )
-
-    if not opt_max_return.success:
-        st.warning("Optimization for Maximum Return Portfolio did not converge.")
-
-    max_return_weights = opt_max_return.x
-    max_return_return, max_return_volatility = portfolio_performance(max_return_weights, mean_returns, cov_matrix)
-    max_return_sharpe = (max_return_return - risk_free_rate) / max_return_volatility
-
-    # **C. Maximum Sharpe Ratio Portfolio**
+    # **B. Maximum Sharpe Ratio Portfolio**
 
     def neg_sharpe_ratio(weights, mean_returns, cov_matrix, risk_free_rate):
         p_ret, p_vol = portfolio_performance(weights, mean_returns, cov_matrix)
@@ -257,6 +234,28 @@ def optimize_portfolios():
     max_sharpe_weights = opt_max_sharpe.x
     max_sharpe_return, max_sharpe_volatility = portfolio_performance(max_sharpe_weights, mean_returns, cov_matrix)
     max_sharpe_ratio = (max_sharpe_return - risk_free_rate) / max_sharpe_volatility
+
+    # **C. Maximum Return Portfolio**
+
+    def neg_portfolio_return(weights, mean_returns):
+        return -np.dot(weights, mean_returns) * 252
+
+    opt_max_return = minimize(
+        neg_portfolio_return,
+        init_guess,
+        args=(mean_returns,),
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints,
+        options=options
+    )
+
+    if not opt_max_return.success:
+        st.warning("Optimization for Maximum Return Portfolio did not converge.")
+
+    max_return_weights = opt_max_return.x
+    max_return_return, max_return_volatility = portfolio_performance(max_return_weights, mean_returns, cov_matrix)
+    max_return_sharpe = (max_return_return - risk_free_rate) / max_return_volatility
 
     # **D. Market Cap Weighted Portfolio**
 
@@ -296,17 +295,17 @@ def optimize_portfolios():
             'Volatility': min_var_volatility,
             'Sharpe': min_var_sharpe
         },
-        'Maximum Return': {
-            'Weights': max_return_weights,
-            'Return': max_return_return,
-            'Volatility': max_return_volatility,
-            'Sharpe': max_return_sharpe
-        },
         'Maximum Sharpe Ratio': {
             'Weights': max_sharpe_weights,
             'Return': max_sharpe_return,
             'Volatility': max_sharpe_volatility,
             'Sharpe': max_sharpe_ratio
+        },
+        'Maximum Return': {
+            'Weights': max_return_weights,
+            'Return': max_return_return,
+            'Volatility': max_return_volatility,
+            'Sharpe': max_return_sharpe
         },
         'Market Cap Weighted': {
             'Weights': market_cap_weights,
@@ -319,6 +318,28 @@ def optimize_portfolios():
     return portfolios
 
 portfolios = optimize_portfolios()
+
+# **Generate Random Portfolios for Efficient Frontier**
+
+def random_portfolios(num_portfolios, mean_returns, cov_matrix, risk_free_rate):
+    results = np.zeros((3, num_portfolios))
+    for i in range(num_portfolios):
+        weights = np.random.dirichlet(np.ones(num_assets), size=1)[0]
+        weights = np.minimum(weights, max_weight)
+        weights /= np.sum(weights)
+        p_return, p_volatility = portfolio_performance(weights, mean_returns, cov_matrix)
+        p_sharpe = (p_return - risk_free_rate) / p_volatility
+        results[0, i] = p_volatility * 100  # Convert to percentage
+        results[1, i] = p_return * 100      # Convert to percentage
+        results[2, i] = p_sharpe
+    return results
+
+@st.cache_data
+def generate_efficient_frontier():
+    results = random_portfolios(10000, mean_returns, cov_matrix, risk_free_rate)
+    return results
+
+results = generate_efficient_frontier()
 
 # **Display Portfolio Weights and Performance**
 
@@ -333,12 +354,11 @@ def display_portfolio(weights, portfolio_name):
     # Compute portfolio daily returns
     portfolio_returns = compute_portfolio_returns(weights, returns)
     # Align portfolio returns with benchmark returns
+    portfolio_returns.index = pd.to_datetime(portfolio_returns.index).tz_localize(None)
+    benchmark_returns.index = pd.to_datetime(benchmark_returns.index).tz_localize(None)
     common_dates = portfolio_returns.index.intersection(benchmark_returns.index)
     portfolio_returns = portfolio_returns.loc[common_dates]
     benchmark_returns_aligned = benchmark_returns.loc[common_dates]
-
-    st.write(f"Length of portfolio_returns: {len(portfolio_returns)}")
-    st.write(f"Length of benchmark_returns_aligned: {len(benchmark_returns_aligned)}")
 
     # Compute beta
     covariance = portfolio_returns.cov(benchmark_returns_aligned)
@@ -370,41 +390,24 @@ st.write(f"**Sharpe Ratio:** {benchmark_sharpe:.2f}")
 
 # **Plot Efficient Frontier and Portfolios**
 
-def random_portfolios(num_portfolios, mean_returns, cov_matrix, risk_free_rate):
-    results = np.zeros((3, num_portfolios))
-    for i in range(num_portfolios):
-        weights = np.random.dirichlet(np.ones(num_assets), size=1)[0]
-        weights = np.minimum(weights, max_weight)
-        weights /= np.sum(weights)
-        p_return, p_volatility = portfolio_performance(weights, mean_returns, cov_matrix)
-        p_sharpe = (p_return - risk_free_rate) / p_volatility
-        results[0, i] = p_volatility * 100  # Convert to percentage
-        results[1, i] = p_return * 100      # Convert to percentage
-        results[2, i] = p_sharpe
-    return results
-
-@st.cache_data
-def generate_efficient_frontier():
-    results = random_portfolios(10000, mean_returns, cov_matrix, risk_free_rate)
-    return results
-
-results = generate_efficient_frontier()
-
 st.header("Efficient Frontier")
 
 plt.figure(figsize=(12, 8))
+
+# Plot the random portfolios
 plt.scatter(results[0], results[1], c=results[2], cmap='viridis', s=2, alpha=0.5)
 plt.colorbar(label='Sharpe Ratio')
 plt.xlabel('Volatility (%)')
 plt.ylabel('Expected Return (%)')
 plt.title('Efficient Frontier')
 
-# Plotting the portfolios as circles with adjusted sizes
+# Plot the optimized portfolios
 for name, data in portfolios.items():
-    plt.scatter(data['Volatility'] * 100, data['Return'] * 100, marker='o', s=25, label=name)
+    plt.scatter(data['Volatility'] * 100, data['Return'] * 100, marker='o', s=100, label=name)
 
 # Plot benchmark
-plt.scatter(benchmark_annual_volatility, benchmark_annual_return, marker='D', color='red', s=25, label=f'{benchmark_ticker} Benchmark')
+plt.scatter(benchmark_annual_volatility, benchmark_annual_return, marker='D', color='red', s=100,
+            label=f'{benchmark_ticker} Benchmark')
 
 plt.legend(labelspacing=0.8)
 
