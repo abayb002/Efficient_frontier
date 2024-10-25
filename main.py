@@ -83,29 +83,63 @@ def fetch_data(tickers, benchmark_ticker, start_date, end_date):
     # Fetch assets data
     try:
         data = yf.download(tickers, start=start_date, end=end_date, progress=False)['Adj Close']
-        data = data.ffill().dropna()
     except Exception as e:
         st.error(f"Error fetching data: {e}")
         st.stop()
 
+    if data.empty:
+        st.error("Asset data is empty after fetching. Please check the tickers and date range.")
+        st.stop()
+    else:
+        st.write(f"Fetched data for assets: {data.shape}")
+        st.write(f"Asset data date range: {data.index.min()} to {data.index.max()}")
+
     # Fetch benchmark data
     try:
         benchmark_data = yf.download(benchmark_ticker, start=start_date, end=end_date, progress=False)['Adj Close']
-        benchmark_data = benchmark_data.ffill().dropna()
     except Exception as e:
         st.error(f"Error fetching benchmark data: {e}")
         st.stop()
 
-    # Align dates
-    data = data.loc[benchmark_data.index]
-    benchmark_data = benchmark_data.loc[data.index]
+    if benchmark_data.empty:
+        st.error("Benchmark data is empty after fetching. Please check the benchmark ticker and date range.")
+        st.stop()
+    else:
+        st.write(f"Fetched benchmark data: {benchmark_data.shape}")
+        st.write(f"Benchmark data date range: {benchmark_data.index.min()} to {benchmark_data.index.max()}")
 
+    # Forward fill and drop NaNs
+    data = data.ffill().dropna()
+    benchmark_data = benchmark_data.ffill().dropna()
+
+    # Align dates using intersection
+    common_dates = data.index.intersection(benchmark_data.index)
+    if common_dates.empty:
+        st.error("No overlapping dates between asset data and benchmark data.")
+        st.stop()
+    else:
+        st.write(f"Number of overlapping dates: {len(common_dates)}")
+
+    data = data.loc[common_dates]
+    benchmark_data = benchmark_data.loc[common_dates]
+
+    # Compute returns
     returns = data.pct_change().dropna()
     benchmark_returns = benchmark_data.pct_change().dropna()
 
     # Re-align after pct_change
-    returns = returns.loc[benchmark_returns.index]
-    benchmark_returns = benchmark_returns.loc[returns.index]
+    common_dates = returns.index.intersection(benchmark_returns.index)
+    if common_dates.empty:
+        st.error("No overlapping dates between asset returns and benchmark returns.")
+        st.stop()
+    else:
+        st.write(f"Number of overlapping dates after returns calculation: {len(common_dates)}")
+
+    returns = returns.loc[common_dates]
+    benchmark_returns = benchmark_returns.loc[common_dates]
+
+    st.write(f"Final returns shape: {returns.shape}")
+    st.write(f"Final benchmark returns shape: {benchmark_returns.shape}")
 
     return returns, benchmark_returns, tickers, benchmark_data
 
@@ -299,11 +333,16 @@ def display_portfolio(weights, portfolio_name):
     # Compute portfolio daily returns
     portfolio_returns = compute_portfolio_returns(weights, returns)
     # Align portfolio returns with benchmark returns
-    portfolio_returns = portfolio_returns.loc[benchmark_returns.index]
+    common_dates = portfolio_returns.index.intersection(benchmark_returns.index)
+    portfolio_returns = portfolio_returns.loc[common_dates]
+    benchmark_returns_aligned = benchmark_returns.loc[common_dates]
+
+    st.write(f"Length of portfolio_returns: {len(portfolio_returns)}")
+    st.write(f"Length of benchmark_returns_aligned: {len(benchmark_returns_aligned)}")
 
     # Compute beta
-    covariance = portfolio_returns.cov(benchmark_returns)
-    benchmark_variance = benchmark_returns.var()
+    covariance = portfolio_returns.cov(benchmark_returns_aligned)
+    benchmark_variance = benchmark_returns_aligned.var()
     beta = covariance / benchmark_variance
 
     st.write(f"**Expected Annual Return:** {p_return*100:.2f}%")
