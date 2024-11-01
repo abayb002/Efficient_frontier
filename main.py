@@ -93,9 +93,7 @@ def fetch_data(tickers, benchmark_ticker, start_date, end_date):
 
     # Fetch benchmark data
     try:
-        # Ensure benchmark_ticker is a string, not a list
         benchmark_data = yf.download(benchmark_ticker, start=start_date, end=end_date, progress=False)['Adj Close']
-        # Convert to Series if DataFrame with single column
         if isinstance(benchmark_data, pd.DataFrame):
             benchmark_data = benchmark_data.squeeze()
     except Exception as e:
@@ -180,12 +178,12 @@ def compute_portfolio_returns(weights, returns_df):
 # **Display Covariance Matrix**
 
 st.header("Covariance Matrix")
-cov_matrix_df = pd.DataFrame(cov_matrix, index=tickers, columns=tickers)  # Annualized covariance
+cov_matrix_df = pd.DataFrame(cov_matrix, index=tickers, columns=tickers)
 st.dataframe(cov_matrix_df.style.background_gradient(cmap='coolwarm').format("{:.4f}"))
 
 # Constraints and bounds
 constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
-bounds = tuple((0, max_weight) for _ in range(num_assets))  # Bounds between 0% and max_weight
+bounds = tuple((0, max_weight) for _ in range(num_assets))
 
 # Initial guess
 init_guess = num_assets * [1. / num_assets]
@@ -372,8 +370,8 @@ def display_portfolio(weights, portfolio_name):
     benchmark_variance = benchmark_returns_aligned.var()
     beta = covariance / benchmark_variance
 
-    st.write(f"**Expected Annual Return:** {p_return:.2f}%")
-    st.write(f"**Annual Volatility (Risk):** {p_volatility:.2f}%")
+    st.write(f"**Expected Annual Return:** {p_return * 100:.2f}%")
+    st.write(f"**Annual Volatility (Risk):** {p_volatility * 100:.2f}%")
     st.write(f"**Sharpe Ratio:** {p_sharpe:.2f}")
     st.write(f"**Beta with respect to {benchmark_ticker}:** {beta:.2f}")
 
@@ -406,14 +404,11 @@ ef_volatilities = [p['Volatility'] for p in efficient_frontier]
 plt.figure(figsize=(12, 8))
 
 # Plot the efficient frontier line
-plt.plot(ef_volatilities, ef_returns, 'b-', linewidth=2, label='Efficient Frontier')
+plt.plot(np.array(ef_volatilities) * 100, np.array(ef_returns) * 100, 'b-', linewidth=2, label='Efficient Frontier')
 
 # Plot the optimized portfolios
 for name, data in portfolios.items():
-    if name == 'Maximum Sharpe Ratio':
-        plt.scatter(data['Volatility'], data['Return'], marker='*', color='r', s=500, label=name)
-    else:
-        plt.scatter(data['Volatility'], data['Return'], marker='o', s=100, label=name)
+    plt.scatter(data['Volatility'] * 100, data['Return'] * 100, marker='o', s=100, label=name)
 
 # Plot benchmark
 plt.scatter(benchmark_annual_volatility, benchmark_annual_return, marker='D', color='red', s=100,
@@ -425,10 +420,10 @@ plt.title('Efficient Frontier')
 plt.legend(labelspacing=0.8)
 
 # Adjust axis limits
-x_min = min(ef_volatilities + [data['Volatility'] for data in portfolios.values()]) * 0.9
-x_max = max(ef_volatilities + [data['Volatility'] for data in portfolios.values()]) * 1.1
-y_min = min(ef_returns + [data['Return'] for data in portfolios.values()]) * 0.9
-y_max = max(ef_returns + [data['Return'] for data in portfolios.values()]) * 1.1
+x_min = min(np.array(ef_volatilities) * 100) * 0.9
+x_max = max(np.array(ef_volatilities) * 100) * 1.1
+y_min = min(np.array(ef_returns) * 100) * 0.9
+y_max = max(np.array(ef_returns) * 100) * 1.1
 
 plt.xlim(x_min, x_max)
 plt.ylim(y_min, y_max)
@@ -468,7 +463,6 @@ def monte_carlo_simulation(mean_daily_returns, cov_daily, weights, num_simulatio
     for _ in range(num_simulations):
         daily_returns = np.random.multivariate_normal(mean_daily_returns, cov_daily, num_days)
         port_daily_returns = np.dot(daily_returns, weights)
-        # Compound daily returns to get annual return
         port_cumulative_return = np.prod(1 + port_daily_returns) - 1
         port_returns.append(port_cumulative_return)
     port_returns = np.array(port_returns)
@@ -488,14 +482,10 @@ st.header("Monte Carlo Simulation and Risk Metrics")
 for name, data in portfolios.items():
     with st.expander(f"{name} Portfolio Risk Metrics"):
         weights = data['Weights']
-        # Monte Carlo Simulation using multivariate normal distribution
         portfolio_returns = monte_carlo_simulation(mean_daily_returns, cov_daily, weights)
-        # The portfolio_returns are already annualized through compounding
-        # Calculate VaR and CVaR
         var, cvar = calculate_var_cvar(portfolio_returns, confidence_level=0.95)
-        st.write(f"**Value at Risk (95% confidence):** {var*100:.2f}%")
-        st.write(f"**Conditional Value at Risk (95% confidence):** {cvar*100:.2f}%")
-        # Plot the distribution
+        st.write(f"**Value at Risk (95% confidence):** {var * 100:.2f}%")
+        st.write(f"**Conditional Value at Risk (95% confidence):** {cvar * 100:.2f}%")
         fig, ax = plt.subplots(figsize=(10, 6))
         sns.histplot(portfolio_returns * 100, bins=50, kde=True, color='skyblue', ax=ax)
         ax.set_title(f'Distribution of Simulated Annual Returns ({name} Portfolio)')
