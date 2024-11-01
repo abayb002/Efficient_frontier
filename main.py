@@ -152,17 +152,20 @@ if returns.isnull().values.any():
 
 # **Step 2: Calculate Mean Returns and Covariance Matrix**
 
-# Ensure data alignment and convert to NumPy arrays
-mean_returns = returns.mean().values  # Convert to NumPy array
-cov_matrix = returns.cov().values     # Convert to NumPy array
-returns_array = returns.values        # For use in simulations
+# Calculate daily mean returns and covariance matrix
+mean_daily_returns = returns.mean().values
+cov_daily = returns.cov().values
+
+# Annualize mean returns and covariance matrix
+mean_returns = mean_daily_returns * 252  # Annualized mean returns
+cov_matrix = cov_daily * 252             # Annualized covariance matrix
 
 num_assets = len(tickers)
 
 # Function to calculate portfolio performance
 def portfolio_performance(weights, mean_returns, cov_matrix):
-    returns = np.dot(weights, mean_returns) * 252
-    volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix * 252, weights)))
+    returns = np.dot(weights, mean_returns)
+    volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
     return returns, volatility
 
 # Function to compute portfolio variance
@@ -177,7 +180,7 @@ def compute_portfolio_returns(weights, returns_df):
 # **Display Covariance Matrix**
 
 st.header("Covariance Matrix")
-cov_matrix_df = pd.DataFrame(cov_matrix * 252, index=tickers, columns=tickers)  # Annualized covariance
+cov_matrix_df = pd.DataFrame(cov_matrix, index=tickers, columns=tickers)  # Annualized covariance
 st.dataframe(cov_matrix_df.style.background_gradient(cmap='coolwarm').format("{:.4f}"))
 
 # Constraints and bounds
@@ -238,7 +241,7 @@ def optimize_portfolios():
     # **C. Maximum Return Portfolio**
 
     def neg_portfolio_return(weights, mean_returns):
-        return -np.dot(weights, mean_returns) * 252
+        return -np.dot(weights, mean_returns)
 
     opt_max_return = minimize(
         neg_portfolio_return,
@@ -319,27 +322,31 @@ def optimize_portfolios():
 
 portfolios = optimize_portfolios()
 
-# **Generate Random Portfolios for Efficient Frontier**
+# **Calculate Efficient Frontier**
 
-def random_portfolios(num_portfolios, mean_returns, cov_matrix, risk_free_rate):
-    results = np.zeros((3, num_portfolios))
-    for i in range(num_portfolios):
-        weights = np.random.dirichlet(np.ones(num_assets), size=1)[0]
-        weights = np.minimum(weights, max_weight)
-        weights /= np.sum(weights)
-        p_return, p_volatility = portfolio_performance(weights, mean_returns, cov_matrix)
-        p_sharpe = (p_return - risk_free_rate) / p_volatility
-        results[0, i] = p_volatility * 100  # Convert to percentage
-        results[1, i] = p_return * 100      # Convert to percentage
-        results[2, i] = p_sharpe
-    return results
+def calculate_efficient_frontier(mean_returns, cov_matrix, risk_free_rate, bounds):
+    efficient_portfolios = []
+    target_returns = np.linspace(min(mean_returns), max(mean_returns), 100)
+    for target_return in target_returns:
+        constraints_efficient = (
+            {'type': 'eq', 'fun': lambda x: np.sum(x) - 1},
+            {'type': 'eq', 'fun': lambda x: np.dot(x, mean_returns) - target_return}
+        )
+        result = minimize(
+            portfolio_variance,
+            init_guess,
+            args=(cov_matrix,),
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints_efficient,
+            options=options
+        )
+        if result.success:
+            ret, vol = portfolio_performance(result.x, mean_returns, cov_matrix)
+            efficient_portfolios.append({'Return': ret, 'Volatility': vol})
+    return efficient_portfolios
 
-@st.cache_data
-def generate_efficient_frontier():
-    results = random_portfolios(10000, mean_returns, cov_matrix, risk_free_rate)
-    return results
-
-results = generate_efficient_frontier()
+efficient_frontier = calculate_efficient_frontier(mean_returns, cov_matrix, risk_free_rate, bounds)
 
 # **Display Portfolio Weights and Performance**
 
@@ -365,8 +372,8 @@ def display_portfolio(weights, portfolio_name):
     benchmark_variance = benchmark_returns_aligned.var()
     beta = covariance / benchmark_variance
 
-    st.write(f"**Expected Annual Return:** {p_return*100:.2f}%")
-    st.write(f"**Annual Volatility (Risk):** {p_volatility*100:.2f}%")
+    st.write(f"**Expected Annual Return:** {p_return:.2f}%")
+    st.write(f"**Annual Volatility (Risk):** {p_volatility:.2f}%")
     st.write(f"**Sharpe Ratio:** {p_sharpe:.2f}")
     st.write(f"**Beta with respect to {benchmark_ticker}:** {beta:.2f}")
 
@@ -392,42 +399,36 @@ st.write(f"**Sharpe Ratio:** {benchmark_sharpe:.2f}")
 
 st.header("Efficient Frontier")
 
+# Extract returns and volatilities
+ef_returns = [p['Return'] for p in efficient_frontier]
+ef_volatilities = [p['Volatility'] for p in efficient_frontier]
+
 plt.figure(figsize=(12, 8))
 
-# Plot the random portfolios
-plt.scatter(results[0], results[1], c=results[2], cmap='viridis', s=2, alpha=0.5)
-plt.colorbar(label='Sharpe Ratio')
-plt.xlabel('Volatility (%)')
-plt.ylabel('Expected Return (%)')
-plt.title('Efficient Frontier')
+# Plot the efficient frontier line
+plt.plot(ef_volatilities, ef_returns, 'b-', linewidth=2, label='Efficient Frontier')
 
 # Plot the optimized portfolios
 for name, data in portfolios.items():
-    plt.scatter(data['Volatility'] * 100, data['Return'] * 100, marker='o', s=100, label=name)
+    if name == 'Maximum Sharpe Ratio':
+        plt.scatter(data['Volatility'], data['Return'], marker='*', color='r', s=500, label=name)
+    else:
+        plt.scatter(data['Volatility'], data['Return'], marker='o', s=100, label=name)
 
 # Plot benchmark
 plt.scatter(benchmark_annual_volatility, benchmark_annual_return, marker='D', color='red', s=100,
             label=f'{benchmark_ticker} Benchmark')
 
+plt.xlabel('Volatility (%)')
+plt.ylabel('Expected Return (%)')
+plt.title('Efficient Frontier')
 plt.legend(labelspacing=0.8)
 
-# Adjust axis limits to include all data points
-all_volatilities = np.concatenate([
-    results[0],
-    np.array([data['Volatility'] * 100 for data in portfolios.values()]),
-    np.array([benchmark_annual_volatility])
-])
-
-all_returns = np.concatenate([
-    results[1],
-    np.array([data['Return'] * 100 for data in portfolios.values()]),
-    np.array([benchmark_annual_return])
-])
-
-x_min = np.min(all_volatilities) * 0.9
-x_max = np.max(all_volatilities) * 1.1
-y_min = np.min(all_returns) * 0.9
-y_max = np.max(all_returns) * 1.1
+# Adjust axis limits
+x_min = min(ef_volatilities + [data['Volatility'] for data in portfolios.values()]) * 0.9
+x_max = max(ef_volatilities + [data['Volatility'] for data in portfolios.values()]) * 1.1
+y_min = min(ef_returns + [data['Return'] for data in portfolios.values()]) * 0.9
+y_max = max(ef_returns + [data['Return'] for data in portfolios.values()]) * 1.1
 
 plt.xlim(x_min, x_max)
 plt.ylim(y_min, y_max)
@@ -462,10 +463,8 @@ plt.close(fig)
 
 # **Monte Carlo Simulation and VaR/CVaR Calculations**
 
-def monte_carlo_simulation(mean_returns, cov_matrix, weights, num_simulations=10000, num_days=252):
+def monte_carlo_simulation(mean_daily_returns, cov_daily, weights, num_simulations=10000, num_days=252):
     port_returns = []
-    mean_daily_returns = mean_returns
-    cov_daily = cov_matrix
     for _ in range(num_simulations):
         daily_returns = np.random.multivariate_normal(mean_daily_returns, cov_daily, num_days)
         port_daily_returns = np.dot(daily_returns, weights)
@@ -490,7 +489,7 @@ for name, data in portfolios.items():
     with st.expander(f"{name} Portfolio Risk Metrics"):
         weights = data['Weights']
         # Monte Carlo Simulation using multivariate normal distribution
-        portfolio_returns = monte_carlo_simulation(mean_returns, cov_matrix, weights)
+        portfolio_returns = monte_carlo_simulation(mean_daily_returns, cov_daily, weights)
         # The portfolio_returns are already annualized through compounding
         # Calculate VaR and CVaR
         var, cvar = calculate_var_cvar(portfolio_returns, confidence_level=0.95)
